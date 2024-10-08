@@ -1,1 +1,3 @@
-# FILL OUT YOUR CHAINLIT MD HERE WITH A DESCRIPTION OF YOUR APPLICATION
+# AIM Prototype
+
+Check out this cool app I made to chat with Paul Graham's essays!

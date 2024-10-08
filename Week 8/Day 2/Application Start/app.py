@@ -1,129 +1,119 @@
-import os
-import chainlit as cl
-from dotenv import load_dotenv
-from operator import itemgetter
-from langchain_huggingface import HuggingFaceEndpoint
+# flake8: noqa ignore
+
+from langchain_community.vectorstores import FAISS
+from langchain_community.llms import HuggingFaceEndpoint
+from langchain_core.prompts import PromptTemplate
+from langchain_huggingface.embeddings import HuggingFaceEndpointEmbeddings
+import numpy as np
+from numpy.linalg import norm
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_huggingface import HuggingFaceEndpointEmbeddings
-from langchain_core.prompts import PromptTemplate
+from operator import itemgetter
 from langchain.schema.output_parser import StrOutputParser
 from langchain.schema.runnable import RunnablePassthrough
-from langchain.schema.runnable.config import RunnableConfig
+from langchain_core.runnables.passthrough import RunnablePassthrough
+from langchain_core.runnables.config import RunnableConfig
+from dotenv import load_dotenv
+import chainlit as cl
+import os
+import uuid
 
-# GLOBAL SCOPE - ENTIRE APPLICATION HAS ACCESS TO VALUES SET IN THIS SCOPE #
-# ---- ENV VARIABLES ---- # 
-"""
-This function will load our environment file (.env) if it is present.
-
-NOTE: Make sure that .env is in your .gitignore file - it is by default, but please ensure it remains there.
-"""
 load_dotenv()
 
-"""
-We will load our environment variables here.
-"""
 HF_LLM_ENDPOINT = os.environ["HF_LLM_ENDPOINT"]
 HF_EMBED_ENDPOINT = os.environ["HF_EMBED_ENDPOINT"]
 HF_TOKEN = os.environ["HF_TOKEN"]
 
-# ---- GLOBAL DECLARATIONS ---- #
+document_loader = TextLoader("data/paul-graham-to-kindle/paul_graham_essays.txt")
+documents = document_loader.load()
 
-# -- RETRIEVAL -- #
-"""
-1. Load Documents from Text File
-2. Split Documents into Chunks
-3. Load HuggingFace Embeddings (remember to use the URL we set above)
-4. Index Files if they do not exist, otherwise load the vectorstore
-"""
-### 1. CREATE TEXT LOADER AND LOAD DOCUMENTS
-### NOTE: PAY ATTENTION TO THE PATH THEY ARE IN. 
-text_loader = 
-documents = 
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=30)
+split_documents = text_splitter.split_documents(documents)
 
-### 2. CREATE TEXT SPLITTER AND SPLIT DOCUMENTS
-text_splitter = 
-split_documents = 
+hf_embeddings = HuggingFaceEndpointEmbeddings(
+    model=HF_EMBED_ENDPOINT,
+    task="feature-extraction",
+    huggingfacehub_api_token=HF_TOKEN,
+)
 
-### 3. LOAD HUGGINGFACE EMBEDDINGS
-hf_embeddings = 
-
-if os.path.exists("./data/vectorstore"):
+if os.path.exists("./data/vectorstore/index.faiss"):
     vectorstore = FAISS.load_local(
-        "./data/vectorstore", 
-        hf_embeddings, 
-        allow_dangerous_deserialization=True # this is necessary to load the vectorstore from disk as it's stored as a `.pkl` file.
+        "./data/vectorstore",
+        hf_embeddings,
     )
     hf_retriever = vectorstore.as_retriever()
     print("Loaded Vectorstore")
 else:
     print("Indexing Files")
-    os.makedirs("./data/vectorstore", exist_ok=True)
-    ### 4. INDEX FILES
-    ### NOTE: REMEMBER TO BATCH THE DOCUMENTS WITH MAXIMUM BATCH SIZE = 32
+    for i in range(0, len(split_documents), 32):
+        if i == 0:
+            vectorstore = FAISS.from_documents(
+                split_documents[i : i + 32], hf_embeddings
+            )
+            continue
+        vectorstore.add_documents(split_documents[i : i + 32])
 
 hf_retriever = vectorstore.as_retriever()
 
-# -- AUGMENTED -- #
-"""
-1. Define a String Template
-2. Create a Prompt Template from the String Template
-"""
-### 1. DEFINE STRING TEMPLATE
-RAG_PROMPT_TEMPLATE = 
+RAG_PROMPT_TEMPLATE = """\
+<|start_header_id|>system<|end_header_id|>
+You are a helpful assistant. You answer user questions based on provided context. If you can't answer the question with the provided context, say you don't know.<|eot_id|>
 
-### 2. CREATE PROMPT TEMPLATE
-rag_prompt =
+<|start_header_id|>user<|end_header_id|>
+User Query:
+{query}
 
-# -- GENERATION -- #
+Context:
+{context}<|eot_id|>
+
+<|start_header_id|>assistant<|end_header_id|>
 """
-1. Create a HuggingFaceEndpoint for the LLM
-"""
-### 1. CREATE HUGGINGFACE ENDPOINT FOR LLM
-hf_llm = 
 
-@cl.author_rename
-def rename(original_author: str):
-    """
-    This function can be used to rename the 'author' of a message. 
+rag_prompt = PromptTemplate.from_template(RAG_PROMPT_TEMPLATE)
 
-    In this case, we're overriding the 'Assistant' author to be 'Paul Graham Essay Bot'.
-    """
-    rename_dict = {
-        "Assistant" : "Paul Graham Essay Bot"
-    }
-    return rename_dict.get(original_author, original_author)
+hf_llm = HuggingFaceEndpoint(
+    endpoint_url=f"{HF_LLM_ENDPOINT}",
+    max_new_tokens=512,
+    top_k=10,
+    top_p=0.95,
+    typical_p=0.95,
+    temperature=0.01,
+    repetition_penalty=1.03,
+    huggingfacehub_api_token=HF_TOKEN,
+)
+
 
 @cl.on_chat_start
-async def start_chat():
-    """
-    This function will be called at the start of every user session. 
-
-    We will build our LCEL RAG chain here, and store it in the user session. 
-
-    The user session is a dictionary that is unique to each user session, and is stored in the memory of the server.
-    """
-
-    ### BUILD LCEL RAG CHAIN THAT ONLY RETURNS TEXT
-    lcel_rag_chain = 
+async def on_chat_start():
+    lcel_rag_chain = (
+        {"context": itemgetter("query") | hf_retriever, "query": itemgetter("query")}
+        | rag_prompt
+        | hf_llm
+    )
 
     cl.user_session.set("lcel_rag_chain", lcel_rag_chain)
+    await cl.Message(
+        content="Hi! What questions do you have about Paul Graham's essays?"
+    ).send()
 
-@cl.on_message  
+
+@cl.author_rename
+def rename(orig_author: str):
+    rename_dict = {
+        "ChatOpenAI": "the Generator...",
+        "VectorStoreRetriever": "the Retriever...",
+    }
+    return rename_dict.get(orig_author, orig_author)
+
+
+@cl.on_message
 async def main(message: cl.Message):
-    """
-    This function will be called every time a message is recieved from a session.
-
-    We will use the LCEL RAG chain to generate a response to the user query.
-
-    The LCEL RAG chain is stored in the user session, and is unique to each user session - this is why we can access it here.
-    """
-    lcel_rag_chain = cl.user_session.get("lcel_rag_chain")
+    runnable = cl.user_session.get("lcel_rag_chain")
 
     msg = cl.Message(content="")
 
-    async for chunk in lcel_rag_chain.astream(
+    async for chunk in runnable.astream(
         {"query": message.content},
         config=RunnableConfig(callbacks=[cl.LangchainCallbackHandler()]),
     ):
